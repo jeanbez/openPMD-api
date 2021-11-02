@@ -331,7 +331,8 @@ public:
    * note that with h5collect mode, m_Seg must be 1
    */
   unsigned int m_Seg = 1;
-  int m_Steps = 1;   //!< num of iterations
+  int m_Steps = 5;   //!< num of iterations
+  int m_Sleep = 60;  //!< duration of sleep time to emulate computation
   std::string m_Backend = ".bp"; //!< I/O backend by file ending
   bool m_Unbalance = false;      //! load is different among processors
 
@@ -499,7 +500,8 @@ int parseArgs( int argc, char *argv[], TestInput& input )
 int
 main( int argc, char *argv[] )
 {
-    MPI_Init( &argc, &argv );
+    int provided;
+    MPI_Init_thread( &argc, &argv, MPI_THREAD_MULTIPLE, &provided );
     TestInput input;
 
     MPI_Comm_size( MPI_COMM_WORLD, &input.m_MPISize );
@@ -582,6 +584,16 @@ void AbstractPattern::run()
             Series series = Series(filename, Access::CREATE, MPI_COMM_WORLD);
             series.setMeshesPath( "fields" );
             store(series, step);
+
+            if (step != m_Input.m_Steps)
+            {
+                if (m_Input.m_MPIRank == 0) {
+                  std::cout << "Sleeping: " << m_Input.m_Sleep << " seconds (computation)" << std::endl; 
+                  std::this_thread::sleep_for(std::chrono::milliseconds(m_Input.m_Sleep * 1000));
+                }
+
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
         }
       }
     }
