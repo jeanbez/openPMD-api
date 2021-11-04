@@ -1310,7 +1310,9 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
     VERIFY(dataType >= 0, "[HDF5] Internal error: Failed to get HDF5 datatype during attribute write");
     std::string name = parameters.name;
 #ifdef HDF5_VOL_ASYNC
-    if( H5Aexists_async(node_id, name.c_str(), es_id) == 0 )
+    hbool_t found;
+    H5Aexists_async(node_id, name.c_str(), &found, es_id);
+    if( found == 0 )
 #else
     if( H5Aexists(node_id, name.c_str()) == 0 )
 #endif
