@@ -125,10 +125,19 @@ HDF5IOHandlerImpl::HDF5IOHandlerImpl(
     else
         m_hdf5_collective_metadata = 0;
 #endif
+    es_id = H5EScreate();
 }
 
 HDF5IOHandlerImpl::~HDF5IOHandlerImpl()
 {
+    size_t n_running;
+    hbool_t op_failed;
+
+    // Finished computation, Wait for all previous operations in the event set to complete
+    H5ESwait(es_id, H5ES_WAIT_FOREVER, &n_running, &op_failed);
+
+    // Close the event set
+    H5ESclose(es_id);
     herr_t status;
     status = H5Tclose(m_H5T_BOOL_ENUM);
     if( status < 0 )
@@ -146,7 +155,11 @@ HDF5IOHandlerImpl::~HDF5IOHandlerImpl()
     while( !m_openFileIDs.empty() )
     {
         auto file = m_openFileIDs.begin();
+#ifdef HDF5_VOL_ASYNC
+        status = H5Fclose_async(*file, es_id);
+#else
         status = H5Fclose(*file);
+#endif
         if( status < 0 )
             std::cerr << "[HDF5] Internal error: Failed to close HDF5 file (serial)\n";
         m_openFileIDs.erase(file);
@@ -188,10 +201,18 @@ HDF5IOHandlerImpl::createFile(Writable* writable,
             flags = H5F_ACC_TRUNC;
         else
             flags = H5F_ACC_EXCL;
+#ifdef HDF5_VOL_ASYNC
+        hid_t id = H5Fcreate_async(name.c_str(),
+                             flags,
+                             H5P_DEFAULT,
+                             m_fileAccessProperty,
+                             es_id);
+#else
         hid_t id = H5Fcreate(name.c_str(),
                              flags,
                              H5P_DEFAULT,
                              m_fileAccessProperty);
+#endif
         VERIFY(id >= 0, "[HDF5] Internal error: Failed to create HDF5 file");
 
         writable->written = true;
@@ -236,9 +257,16 @@ HDF5IOHandlerImpl::createPath(Writable* writable,
         else
             position = writable; /* root does not have a parent but might still have to be written */
         File file = getFile( position ).get();
+#ifdef HDF5_VOL_ASYNC
+        hid_t node_id = H5Gopen_async(file.id,
+                                concrete_h5_file_position(position).c_str(),
+                                gapl,
+                                es_id);
+#else
         hid_t node_id = H5Gopen(file.id,
                                 concrete_h5_file_position(position).c_str(),
                                 gapl);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during path creation");
 
         /* Create the path in the file */
@@ -247,15 +275,28 @@ HDF5IOHandlerImpl::createPath(Writable* writable,
         for( std::string const& folder : auxiliary::split(path, "/", false) )
         {
             // avoid creation of paths that already exist
+#ifdef HDF5_VOL_ASYNC
+            htri_t const found = H5Lexists_async(groups.top(), folder.c_str(), H5P_DEFAULT, es_id);
+#else
             htri_t const found = H5Lexists(groups.top(), folder.c_str(), H5P_DEFAULT);
+#endif
             if (found > 0)
               continue;
 
+#ifdef HDF5_VOL_ASYNC
+            hid_t group_id = H5Gcreate_async(groups.top(),
+                                       folder.c_str(),
+                                       H5P_DEFAULT,
+                                       H5P_DEFAULT,
+                                       H5P_DEFAULT,
+                                       es_id);
+#else
             hid_t group_id = H5Gcreate(groups.top(),
                                        folder.c_str(),
                                        H5P_DEFAULT,
                                        H5P_DEFAULT,
                                        H5P_DEFAULT);
+#endif
             VERIFY(group_id >= 0, "[HDF5] Internal error: Failed to create HDF5 group during path creation");
             groups.push(group_id);
         }
@@ -263,7 +304,11 @@ HDF5IOHandlerImpl::createPath(Writable* writable,
         /* Close the groups */
         while( !groups.empty() )
         {
+#ifdef HDF5_VOL_ASYNC
+            status = H5Gclose_async(groups.top(), es_id);
+#else
             status = H5Gclose(groups.top());
+#endif
             VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during path creation");
             groups.pop();
         }
@@ -334,9 +379,16 @@ HDF5IOHandlerImpl::createDataset(Writable* writable,
         /* Open H5Object to write into */
         auto res = getFile( writable );
         File file = res ? res.get() : getFile( writable->parent ).get();
+#ifdef HDF5_VOL_ASYNC
+        hid_t node_id = H5Gopen_async(file.id,
+                                concrete_h5_file_position(writable).c_str(),
+                    gapl,
+                    es_id);
+#else
         hid_t node_id = H5Gopen(file.id,
                                 concrete_h5_file_position(writable).c_str(),
                     gapl);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during dataset creation");
 
         Datatype d = parameters.dtype;
@@ -417,6 +469,16 @@ HDF5IOHandlerImpl::createDataset(Writable* writable,
         });
         hid_t datatype = getH5DataType(a);
         VERIFY(datatype >= 0, "[HDF5] Internal error: Failed to get HDF5 datatype during dataset creation");
+#ifdef HDF5_VOL_ASYNC
+        hid_t group_id = H5Dcreate_async(node_id,
+                                   name.c_str(),
+                                   datatype,
+                                   space,
+                                   H5P_DEFAULT,
+                                   datasetCreationProperty,
+                                   H5P_DEFAULT,
+				   es_id);
+#else
         hid_t group_id = H5Dcreate(node_id,
                                    name.c_str(),
                                    datatype,
@@ -424,10 +486,15 @@ HDF5IOHandlerImpl::createDataset(Writable* writable,
                                    H5P_DEFAULT,
                                    datasetCreationProperty,
                                    H5P_DEFAULT);
+#endif
         VERIFY(group_id >= 0, "[HDF5] Internal error: Failed to create HDF5 group during dataset creation");
 
         herr_t status;
+#ifdef HDF5_VOL_ASYNC
+        status = H5Dclose_async(group_id, es_id);
+#else
         status = H5Dclose(group_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset during dataset creation");
         status = H5Tclose(datatype);
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 datatype during dataset creation");
@@ -435,7 +502,11 @@ HDF5IOHandlerImpl::createDataset(Writable* writable,
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset creation property during dataset creation");
         status = H5Sclose(space);
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset space during dataset creation");
+#ifdef HDF5_VOL_ASYNC
+        status = H5Gclose_async(node_id, es_id);
+#else
         status = H5Gclose(node_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during dataset creation");
         status = H5Pclose(gapl);
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during dataset creation");
@@ -460,15 +531,27 @@ HDF5IOHandlerImpl::extendDataset(Writable* writable,
     auto res = getFile( writable );
     if( !res )
         res = getFile( writable->parent );
+#ifdef HDF5_VOL_ASYNC
+    hid_t dataset_id = H5Dopen_async(res.get().id,
+                         concrete_h5_file_position(writable).c_str(),
+                         H5P_DEFAULT,
+			 es_id);
+#else
     hid_t dataset_id = H5Dopen(res.get().id,
                          concrete_h5_file_position(writable).c_str(),
                          H5P_DEFAULT);
+#endif
     VERIFY(dataset_id >= 0, "[HDF5] Internal error: Failed to open HDF5 dataset during dataset extension");
 
     // Datasets may only be extended if they have chunked layout, so let's see
     // whether this one does
     {
+#ifdef HDF5_VOL_ASYNC
+        hid_t dataset_space = H5Dget_space_async( dataset_id, es_id );
+#else
         hid_t dataset_space = H5Dget_space( dataset_id );
+#endif
+
         int ndims = H5Sget_simple_extent_ndims( dataset_space );
         VERIFY(
             ndims >= 0,
@@ -491,10 +574,18 @@ HDF5IOHandlerImpl::extendDataset(Writable* writable,
         size.push_back(static_cast< hsize_t >(val));
 
     herr_t status;
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dset_extent_async(dataset_id, size.data(), es_id);
+#else
     status = H5Dset_extent(dataset_id, size.data());
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to extend HDF5 dataset during dataset extension");
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dclose_async(dataset_id, es_id);
+#else
     status = H5Dclose(dataset_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset during dataset extension");
 }
 
@@ -510,15 +601,27 @@ HDF5IOHandlerImpl::availableChunks(
     VERIFY( fid != m_fileNamesWithID.end(),
             "[HDF5] File ID not found with file name" );
 
+#ifdef HDF5_VOL_ASYNC
+    hid_t dataset_id = H5Dopen_async(
+        fid->second,
+        concrete_h5_file_position( writable ).c_str(),
+        H5P_DEFAULT,
+	es_id );
+#else
     hid_t dataset_id = H5Dopen(
         fid->second,
         concrete_h5_file_position( writable ).c_str(),
         H5P_DEFAULT );
+#endif
     VERIFY(
         dataset_id >= 0,
         "[HDF5] Internal error: Failed to open HDF5 dataset during dataset "
         "read" );
+#ifdef HDF5_VOL_ASYNC
+    hid_t dataset_space = H5Dget_space_async( dataset_id, es_id );
+#else
     hid_t dataset_space = H5Dget_space( dataset_id );
+#endif
     int ndims = H5Sget_simple_extent_ndims( dataset_space );
     VERIFY(
         ndims >= 0,
@@ -589,9 +692,16 @@ HDF5IOHandlerImpl::openFile(
     else
         throw std::runtime_error("[HDF5] Unknown file Access");
     hid_t file_id;
+#ifdef HDF5_VOL_ASYNC
+    file_id = H5Fopen_async(name.c_str(),
+                      flags,
+                      m_fileAccessProperty,
+                      es_id);
+#else
     file_id = H5Fopen(name.c_str(),
                       flags,
                       m_fileAccessProperty);
+#endif
     if( file_id < 0 )
         throw no_such_file_error("[HDF5] Failed to open HDF5 file " + name);
 
@@ -616,7 +726,11 @@ HDF5IOHandlerImpl::closeFile(
             "present in the backend" );
     }
     File file = optionalFile.get();
+#ifdef HDF5_VOL_ASYNC
+    H5Fclose_async( file.id, es_id );
+#else
     H5Fclose( file.id );
+#endif
     m_openFileIDs.erase( file.id );
     m_fileNames.erase( writable );
 
@@ -639,9 +753,15 @@ HDF5IOHandlerImpl::openPath(
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
     node_id = H5Gopen(file.id,
                       concrete_h5_file_position(writable->parent).c_str(),
                       gapl);
+#else
+    node_id = H5Gopen(file.id,
+                  concrete_h5_file_position(writable->parent).c_str(),
+                  gapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during path opening");
 
     /* Sanitize path */
@@ -652,18 +772,33 @@ HDF5IOHandlerImpl::openPath(
             path = auxiliary::replace_first(path, "/", "");
         if( !auxiliary::ends_with(path, '/') )
             path += '/';
+#ifdef HDF5_VOL_ASYNC
+        path_id = H5Gopen_async(node_id,
+                        path.c_str(),
+                        gapl,
+                        es_id);
+#else
         path_id = H5Gopen(node_id,
                         path.c_str(),
                         gapl);
+#endif
         VERIFY(path_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during path opening");
 
         herr_t status;
+#ifdef HDF5_VOL_ASYNC
+        status = H5Gclose_async(path_id, es_id);
+#else
         status = H5Gclose(path_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during path opening");
     }
 
     herr_t status;
+#ifdef HDF5_VOL_ASYNC
+    status = H5Gclose_async(node_id, es_id);
+#else
     status = H5Gclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during path opening");
     status = H5Pclose(gapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during path opening");
@@ -690,9 +825,16 @@ HDF5IOHandlerImpl::openDataset(Writable* writable,
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
+    node_id = H5Gopen_async(file.id,
+                      concrete_h5_file_position(writable->parent).c_str(),
+                      gapl,
+                      es_id);
+#else
     node_id = H5Gopen(file.id,
                       concrete_h5_file_position(writable->parent).c_str(),
                       gapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during dataset opening");
 
     /* Sanitize name */
@@ -702,15 +844,26 @@ HDF5IOHandlerImpl::openDataset(Writable* writable,
     if( !auxiliary::ends_with(name, '/') )
         name += '/';
 
+#ifdef HDF5_VOL_ASYNC
+    dataset_id = H5Dopen_async(node_id,
+                         name.c_str(),
+                         H5P_DEFAULT,
+			 es_id);
+#else
     dataset_id = H5Dopen(node_id,
                          name.c_str(),
                          H5P_DEFAULT);
+#endif
     VERIFY(dataset_id >= 0, "[HDF5] Internal error: Failed to open HDF5 dataset during dataset opening");
 
     hid_t dataset_type, dataset_space;
     dataset_type = H5Dget_type(dataset_id);
-    dataset_space = H5Dget_space(dataset_id);
 
+#ifdef HDF5_VOL_ASYNC
+    dataset_space = H5Dget_space_async( dataset_id, es_id );
+#else
+    dataset_space = H5Dget_space(dataset_id);
+#endif
     H5S_class_t dataset_class = H5Sget_simple_extent_type(dataset_space);
 
     using DT = Datatype;
@@ -777,9 +930,17 @@ HDF5IOHandlerImpl::openDataset(Writable* writable,
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset space during dataset opening");
     status = H5Tclose(dataset_type);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset type during dataset opening");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dclose_async(dataset_id, es_id);
+#else
     status = H5Dclose(dataset_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataset during dataset opening");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Gclose_async(node_id, es_id);
+#else
     status = H5Gclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during dataset opening");
     status = H5Pclose(gapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during dataset opening");
@@ -800,7 +961,11 @@ HDF5IOHandlerImpl::deleteFile(Writable* writable,
     if( writable->written )
     {
         hid_t file_id = getFile( writable ).get().id;
+#ifdef HDF5_VOL_ASYNC
+        herr_t status = H5Fclose_async(file_id, es_id);
+#else
         herr_t status = H5Fclose(file_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 file during file deletion");
 
         std::string name = m_handler->directory + parameters.name;
@@ -843,18 +1008,36 @@ HDF5IOHandlerImpl::deletePath(Writable* writable,
          */
         auto res = getFile( writable );
         File file = res ? res.get() : getFile( writable->parent ).get();
+#ifdef HDF5_VOL_ASYNC
+        hid_t node_id = H5Gopen_async(file.id,
+                                concrete_h5_file_position(writable->parent).c_str(),
+                                H5P_DEFAULT,
+                                es_id);
+#else
         hid_t node_id = H5Gopen(file.id,
                                 concrete_h5_file_position(writable->parent).c_str(),
                                 H5P_DEFAULT);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during path deletion");
 
         path += static_cast< HDF5FilePosition* >(writable->abstractFilePosition.get())->location;
+#ifdef HDF5_VOL_ASYNC
+        herr_t status = H5Ldelete_async(node_id,
+                                  path.c_str(),
+                                  H5P_DEFAULT,
+                                  es_id);
+#else
         herr_t status = H5Ldelete(node_id,
                                   path.c_str(),
                                   H5P_DEFAULT);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to delete HDF5 group");
 
+#ifdef HDF5_VOL_ASYNC
+        status = H5Gclose_async(node_id, es_id);
+#else
         status = H5Gclose(node_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during path deletion");
 
         writable->written = false;
@@ -886,18 +1069,37 @@ HDF5IOHandlerImpl::deleteDataset(Writable* writable,
          */
         auto res = getFile( writable );
         File file = res ? res.get() : getFile( writable->parent ).get();
+#ifdef HDF5_VOL_ASYNC
+        hid_t node_id = H5Gopen_async(file.id,
+                                concrete_h5_file_position(writable->parent).c_str(),
+                                H5P_DEFAULT,
+                                es_id);
+#else
         hid_t node_id = H5Gopen(file.id,
                                 concrete_h5_file_position(writable->parent).c_str(),
                                 H5P_DEFAULT);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during dataset deletion");
 
         name += static_cast< HDF5FilePosition* >(writable->abstractFilePosition.get())->location;
+#ifdef HDF5_VOL_ASYNC
+        herr_t status = H5Ldelete_async(node_id,
+                                  name.c_str(),
+                                  H5P_DEFAULT,
+                                  es_id);
+#else
         herr_t status = H5Ldelete(node_id,
                                   name.c_str(),
                                   H5P_DEFAULT);
+
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to delete HDF5 group");
 
+#ifdef HDF5_VOL_ASYNC
+        status = H5Gclose_async(node_id, es_id);
+#else
         status = H5Gclose(node_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during dataset deletion");
 
         writable->written = false;
@@ -921,16 +1123,27 @@ HDF5IOHandlerImpl::deleteAttribute(Writable* writable,
         /* Open H5Object to delete in */
         auto res = getFile( writable );
         File file = res ? res.get() : getFile( writable->parent ).get();
+#ifdef HDF5_VOL_ASYNC
+        hid_t node_id = H5Oopen_async(file.id,
+                                concrete_h5_file_position(writable).c_str(),
+                                H5P_DEFAULT,
+                                es_id);
+#else
         hid_t node_id = H5Oopen(file.id,
                                 concrete_h5_file_position(writable).c_str(),
                                 H5P_DEFAULT);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during attribute deletion");
 
         herr_t status = H5Adelete(node_id,
                                   name.c_str());
         VERIFY(status == 0, "[HDF5] Internal error: Failed to delete HDF5 attribute");
 
+#ifdef HDF5_VOL_ASYNC
+        status = H5Oclose_async(node_id, es_id);
+#else
         status = H5Oclose(node_id);
+#endif
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group during attribute deletion");
     }
 }
@@ -947,9 +1160,16 @@ HDF5IOHandlerImpl::writeDataset(Writable* writable,
 
     hid_t dataset_id, filespace, memspace;
     herr_t status;
+#ifdef HDF5_VOL_ASYNC
+    dataset_id = H5Dopen_async(file.id,
+                         concrete_h5_file_position(writable).c_str(),
+                         H5P_DEFAULT,
+			 es_id);
+#else
     dataset_id = H5Dopen(file.id,
                          concrete_h5_file_position(writable).c_str(),
                          H5P_DEFAULT);
+#endif
     VERIFY(dataset_id >= 0, "[HDF5] Internal error: Failed to open HDF5 dataset during dataset write");
 
     std::vector< hsize_t > start;
@@ -961,7 +1181,11 @@ HDF5IOHandlerImpl::writeDataset(Writable* writable,
     for( auto const& val : parameters.extent )
         block.push_back(static_cast< hsize_t >(val));
     memspace = H5Screate_simple(static_cast< int >(block.size()), block.data(), nullptr);
+#ifdef HDF5_VOL_ASYNC
+    filespace = H5Dget_space_async(dataset_id, es_id);
+#else
     filespace = H5Dget_space(dataset_id);
+#endif
     status = H5Sselect_hyperslab(filespace,
                                  H5S_SELECT_SET,
                                  start.data(),
@@ -1004,12 +1228,22 @@ HDF5IOHandlerImpl::writeDataset(Writable* writable,
         case DT::CHAR:
         case DT::UCHAR:
         case DT::BOOL:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Dwrite_async(dataset_id,
+                              dataType,
+                              memspace,
+                              filespace,
+                              m_datasetTransferProperty,
+                              data.get(),
+			      es_id);
+#else
             status = H5Dwrite(dataset_id,
                               dataType,
                               memspace,
                               filespace,
                               m_datasetTransferProperty,
                               data.get());
+#endif
             VERIFY(status == 0, "[HDF5] Internal error: Failed to write dataset " + concrete_h5_file_position(writable));
             break;
         case DT::UNDEFINED:
@@ -1023,7 +1257,11 @@ HDF5IOHandlerImpl::writeDataset(Writable* writable,
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset file space during dataset write");
     status = H5Sclose(memspace);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset memory space during dataset write");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dclose_async(dataset_id, es_id);
+#else
     status = H5Dclose(dataset_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset " + concrete_h5_file_position(writable) + " during dataset write");
 
     m_fileNames[writable] = file.name;
@@ -1048,9 +1286,16 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
+    node_id = H5Oopen_async(file.id,
+                      concrete_h5_file_position(writable).c_str(),
+                      fapl,
+                      es_id);
+#else
     node_id = H5Oopen(file.id,
                       concrete_h5_file_position(writable).c_str(),
                       fapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 object during attribute write");
     Attribute const att(parameters.resource);
     Datatype dtype = parameters.dtype;
@@ -1064,24 +1309,45 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
     hid_t dataType = getH5DataType(att);
     VERIFY(dataType >= 0, "[HDF5] Internal error: Failed to get HDF5 datatype during attribute write");
     std::string name = parameters.name;
+#ifdef HDF5_VOL_ASYNC
+    if( H5Aexists_async(node_id, name.c_str(), es_id) == 0 )
+#else
     if( H5Aexists(node_id, name.c_str()) == 0 )
+#endif
     {
         hid_t dataspace = getH5DataSpace(att);
         VERIFY(dataspace >= 0, "[HDF5] Internal error: Failed to get HDF5 dataspace during attribute write");
+#ifdef HDF5_VOL_ASYNC
+        attribute_id = H5Acreate_async(node_id,
+                                 name.c_str(),
+                                 dataType,
+                                 dataspace,
+                                 H5P_DEFAULT,
+                                 H5P_DEFAULT,
+                                 es_id);
+#else
         attribute_id = H5Acreate(node_id,
                                  name.c_str(),
                                  dataType,
                                  dataspace,
                                  H5P_DEFAULT,
                                  H5P_DEFAULT);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to create HDF5 attribute during attribute write");
         status = H5Sclose(dataspace);
         VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 dataspace during attribute write");
     } else
     {
+#ifdef HDF5_VOL_ASYNC
+        attribute_id = H5Aopen_async(node_id,
+                               name.c_str(),
+                               H5P_DEFAULT,
+                               es_id);
+#else
         attribute_id = H5Aopen(node_id,
                                name.c_str(),
                                H5P_DEFAULT);
+#endif
         VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 attribute during attribute write");
     }
 
@@ -1091,183 +1357,366 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
         case DT::CHAR:
         {
             char c = att.get< char >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &c, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &c);
+#endif
             break;
         }
         case DT::UCHAR:
         {
             auto u = att.get< unsigned char >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &u, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &u);
+#endif
             break;
         }
         case DT::SHORT:
         {
             auto i = att.get< short >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &i, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &i);
+#endif
             break;
         }
         case DT::INT:
         {
             int i = att.get< int >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &i, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &i);
+#endif
             break;
         }
         case DT::LONG:
         {
             long i = att.get< long >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &i, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &i);
+#endif
             break;
         }
         case DT::LONGLONG:
         {
             auto i = att.get< long long >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &i, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &i);
+#endif
             break;
         }
         case DT::USHORT:
         {
             auto u = att.get< unsigned short >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &u, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &u);
+#endif
             break;
         }
         case DT::UINT:
         {
             auto u = att.get< unsigned int >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &u, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &u);
+#endif
             break;
         }
         case DT::ULONG:
         {
             auto u = att.get< unsigned long >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &u, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &u);
+#endif
             break;
         }
         case DT::ULONGLONG:
         {
             auto u = att.get< unsigned long long >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &u, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &u);
+#endif
             break;
         }
         case DT::FLOAT:
         {
             auto f = att.get< float >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &f, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &f);
+#endif
             break;
         }
         case DT::DOUBLE:
         {
             auto d = att.get< double >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &d, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &d);
+#endif
             break;
         }
         case DT::LONG_DOUBLE:
         {
             auto d = att.get< long double >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &d, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &d);
+#endif            
             break;
         }
         case DT::CFLOAT:
         {
             std::complex< float > f = att.get< std::complex< float > >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &f, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &f);
+#endif            
             break;
         }
         case DT::CDOUBLE:
         {
             std::complex< double > d = att.get< std::complex< double > >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &d, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &d);
+#endif
             break;
         }
         case DT::CLONG_DOUBLE:
         {
             std::complex< long double > d = att.get< std::complex< long double > >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &d, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &d);
+#endif
             break;
         }
         case DT::STRING:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::string >().c_str(),
+                              es_id);
+#else      
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::string >().c_str());
+#endif
             break;
         case DT::VEC_CHAR:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< char > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< char > >().data());
+#endif
             break;
         case DT::VEC_SHORT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< short > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< short > >().data());
+#endif
             break;
         case DT::VEC_INT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< int > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< int > >().data());
+#endif
             break;
         case DT::VEC_LONG:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< long > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< long > >().data());
+#endif
             break;
         case DT::VEC_LONGLONG:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< long long > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< long long > >().data());
+#endif
             break;
         case DT::VEC_UCHAR:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< unsigned char > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< unsigned char > >().data());
+#endif
             break;
         case DT::VEC_USHORT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< unsigned short > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< unsigned short > >().data());
+#endif
             break;
         case DT::VEC_UINT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< unsigned int > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< unsigned int > >().data());
+#endif
             break;
         case DT::VEC_ULONG:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< unsigned long > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< unsigned long > >().data());
+#endif
             break;
         case DT::VEC_ULONGLONG:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< unsigned long long > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< unsigned long long > >().data());
+#endif
             break;
         case DT::VEC_FLOAT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< float > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< float > >().data());
+#endif
             break;
         case DT::VEC_DOUBLE:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< double > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< double > >().data());
+#endif
             break;
         case DT::VEC_LONG_DOUBLE:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< long double > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< long double > >().data());
+#endif
             break;
         case DT::VEC_CFLOAT:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< std::complex< float > > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< std::complex< float > > >().data());
+#endif
             break;
         case DT::VEC_CDOUBLE:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< std::complex< double > > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< std::complex< double > > >().data());
+#endif
             break;
         case DT::VEC_CLONG_DOUBLE:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::vector< std::complex< long double > > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::vector< std::complex< long double > > >().data());
+#endif
             break;
         case DT::VEC_STRING:
         {
@@ -1278,18 +1727,33 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
             std::unique_ptr< char[] > c_str(new char[max_len * vs.size()]);
             for( size_t i = 0; i < vs.size(); ++i )
                 strncpy(c_str.get() + i*max_len, vs[i].c_str(), max_len);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, c_str.get(), es_id);
+#else
             status = H5Awrite(attribute_id, dataType, c_str.get());
+#endif
             break;
         }
         case DT::ARR_DBL_7:
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id,
+                              dataType,
+                              att.get< std::array< double, 7 > >().data(),
+                              es_id);
+#else
             status = H5Awrite(attribute_id,
                               dataType,
                               att.get< std::array< double, 7 > >().data());
+#endif
             break;
         case DT::BOOL:
         {
             bool b = att.get< bool >();
+#ifdef HDF5_VOL_ASYNC
+            status = H5Awrite_async(attribute_id, dataType, &b, es_id);
+#else
             status = H5Awrite(attribute_id, dataType, &b);
+#endif
             break;
         }
         case DT::UNDEFINED:
@@ -1301,9 +1765,17 @@ HDF5IOHandlerImpl::writeAttribute(Writable* writable,
     status = H5Tclose(dataType);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 datatype during Attribute write");
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Aclose_async(attribute_id, es_id);
+#else
     status = H5Aclose(attribute_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close attribute " + name + " at " + concrete_h5_file_position(writable) + " during attribute write");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Oclose_async(node_id, es_id);
+#else
     status = H5Oclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close " + concrete_h5_file_position(writable) + " during attribute write");
     status = H5Pclose(fapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during attribute write");
@@ -1319,9 +1791,16 @@ HDF5IOHandlerImpl::readDataset(Writable* writable,
         File file = res ? res.get() : getFile( writable->parent ).get();
     hid_t dataset_id, memspace, filespace;
     herr_t status;
+#ifdef HDF5_VOL_ASYNC
+    dataset_id = H5Dopen_async(file.id,
+                         concrete_h5_file_position(writable).c_str(),
+                         H5P_DEFAULT,
+			 es_id);
+#else
     dataset_id = H5Dopen(file.id,
                          concrete_h5_file_position(writable).c_str(),
                          H5P_DEFAULT);
+#endif
     VERIFY(dataset_id >= 0, "[HDF5] Internal error: Failed to open HDF5 dataset during dataset read");
 
     std::vector< hsize_t > start;
@@ -1333,7 +1812,11 @@ HDF5IOHandlerImpl::readDataset(Writable* writable,
     for( auto const& val : parameters.extent )
         block.push_back(static_cast< hsize_t >(val));
     memspace = H5Screate_simple(static_cast< int >(block.size()), block.data(), nullptr);
+#ifdef HDF5_VOL_ASYNC
+    filespace = H5Dget_space_async(dataset_id, es_id);
+#else
     filespace = H5Dget_space(dataset_id);
+#endif
     status = H5Sselect_hyperslab(filespace,
                                  H5S_SELECT_SET,
                                  start.data(),
@@ -1380,12 +1863,22 @@ HDF5IOHandlerImpl::readDataset(Writable* writable,
     });
     hid_t dataType = getH5DataType(a);
     VERIFY(dataType >= 0, "[HDF5] Internal error: Failed to get HDF5 datatype during dataset read");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dread_async(dataset_id,
+                     dataType,
+                     memspace,
+                     filespace,
+                     m_datasetTransferProperty,
+                     data,
+		     es_id);
+#else
     status = H5Dread(dataset_id,
                      dataType,
                      memspace,
                      filespace,
                      m_datasetTransferProperty,
                      data);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to read dataset");
 
     status = H5Tclose(dataType);
@@ -1394,7 +1887,11 @@ HDF5IOHandlerImpl::readDataset(Writable* writable,
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset file space during dataset read");
     status = H5Sclose(memspace);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset memory space during dataset read");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Dclose_async(dataset_id, es_id);
+#else
     status = H5Dclose(dataset_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close dataset during dataset read");
 }
 
@@ -1419,15 +1916,29 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
     }
 #endif
 
-    obj_id = H5Oopen(file.id,
+#ifdef HDF5_VOL_ASYNC
+    obj_id = H5Oopen_async(file.id,
                      concrete_h5_file_position(writable).c_str(),
-                     fapl);
+                     fapl,
+                     es_id);
+#else    
+    obj_id = H5Oopen(file.id,
+                 concrete_h5_file_position(writable).c_str(),
+                 fapl);
+#endif
     VERIFY(obj_id >= 0, std::string("[HDF5] Internal error: Failed to open HDF5 object '") +
         concrete_h5_file_position(writable).c_str() + "' during attribute read");
     std::string const & attr_name = parameters.name;
+#ifdef HDF5_VOL_ASYNC
+    attr_id = H5Aopen_async(obj_id,
+                      attr_name.c_str(),
+                      H5P_DEFAULT,
+                      es_id);
+#else
     attr_id = H5Aopen(obj_id,
                       attr_name.c_str(),
                       H5P_DEFAULT);
+#endif
     VERIFY(attr_id >= 0,
         std::string("[HDF5] Internal error: Failed to open HDF5 attribute '") +
         attr_name + "' (" +
@@ -1453,93 +1964,184 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
         if( H5Tequal(attr_type, H5T_NATIVE_CHAR) )
         {
             char c;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &c,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &c);
+#endif
             a = Attribute(c);
         } else if( H5Tequal(attr_type, H5T_NATIVE_UCHAR) )
         {
             unsigned char u;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &u,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &u);
+#endif
             a = Attribute(u);
         } else if( H5Tequal(attr_type, H5T_NATIVE_SHORT) )
         {
             short i;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &i,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &i);
+#endif
             a = Attribute(i);
         } else if( H5Tequal(attr_type, H5T_NATIVE_INT) )
         {
             int i;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &i,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &i);
+#endif
             a = Attribute(i);
         } else if( H5Tequal(attr_type, H5T_NATIVE_LONG) )
         {
             long i;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &i,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &i);
+#endif
             a = Attribute(i);
         } else if( H5Tequal(attr_type, H5T_NATIVE_LLONG) )
         {
             long long i;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &i,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &i);
+#endif
             a = Attribute(i);
         } else if( H5Tequal(attr_type, H5T_NATIVE_USHORT) )
         {
             unsigned short u;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &u,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &u);
+#endif
             a = Attribute(u);
         } else if( H5Tequal(attr_type, H5T_NATIVE_UINT) )
         {
             unsigned int u;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &u,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &u);
+#endif
             a = Attribute(u);
         } else if( H5Tequal(attr_type, H5T_NATIVE_ULONG) )
         {
             unsigned long u;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &u,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &u);
+#endif
             a = Attribute(u);
         } else if( H5Tequal(attr_type, H5T_NATIVE_ULLONG) )
         {
             unsigned long long u;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &u,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &u);
+#endif
             a = Attribute(u);
         } else if( H5Tequal(attr_type, H5T_NATIVE_FLOAT) )
         {
             float f;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &f,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &f);
+#endif
             a = Attribute(f);
         } else if( H5Tequal(attr_type, H5T_NATIVE_DOUBLE) )
         {
             double d;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &d,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &d);
+#endif
             a = Attribute(d);
         } else if( H5Tequal(attr_type, H5T_NATIVE_LDOUBLE) )
         {
             long double l;
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             &l,
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              &l);
+#endif
             a = Attribute(l);
         } else if( H5Tget_class(attr_type) == H5T_STRING )
         {
@@ -1549,9 +2151,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
                 // https://github.com/HDFGroup/hdf5/blob/hdf5-1_12_0/tools/src/h5dump/h5dump_xml.c
                 hsize_t size = H5Tget_size(attr_type); // not yet the actual string length
                 std::vector< char > vc(size); // byte buffer to vlen strings
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 vc.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  vc.data());
+#endif
                 auto c_str = *((char**)vc.data()); // get actual string out
                 a = Attribute(std::string(c_str));
                 // free dynamically allocated vlen memory from H5Aread
@@ -1562,9 +2171,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
             {
                 hsize_t size = H5Tget_size(attr_type);
                 std::vector< char > vc(size);
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 vc.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  vc.data());
+#endif
                 a = Attribute(auxiliary::strip(std::string(vc.data(), size), {'\0'}));
             }
         } else if( H5Tget_class(attr_type) == H5T_ENUM )
@@ -1584,9 +2200,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
             if( attrIsBool )
             {
                 int8_t enumVal;
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 &enumVal,
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  &enumVal);
+#endif
                 a = Attribute(static_cast< bool >(enumVal));
             } else
                 throw unsupported_data_error("[HDF5] Unsupported attribute enumeration");
@@ -1626,9 +2249,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
             if( isLegacyLibSplashAttr )
             {
                 std::vector< hsize_t > vc(3, 0);
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 vc.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  vc.data());
+#endif
                 a = Attribute(vc);
             } else if( isComplexType )
             {
@@ -1636,19 +2266,31 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
                 if( complexSize == sizeof(float) )
                 {
                     std::complex< float > cf;
+#ifdef HDF5_VOL_ASYNC
+                    status = H5Aread_async(attr_id, attr_type, &cf, es_id);
+#else
                     status = H5Aread(attr_id, attr_type, &cf);
+#endif
                     a = Attribute(cf);
                 }
                 else if( complexSize == sizeof(double) )
                 {
                     std::complex< double > cd;
+#ifdef HDF5_VOL_ASYNC
+                    status = H5Aread_async(attr_id, attr_type, &cd, es_id);
+#else
                     status = H5Aread(attr_id, attr_type, &cd);
+#endif
                     a = Attribute(cd);
                 }
                 else if( complexSize == sizeof(long double) )
                 {
                     std::complex< long double > cld;
+#ifdef HDF5_VOL_ASYNC
+                    status = H5Aread_async(attr_id, attr_type, &cld, es_id);
+#else
                     status = H5Aread(attr_id, attr_type, &cld);
+#endif
                     a = Attribute(cld);
                 }
                 else
@@ -1667,124 +2309,243 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
         if( H5Tequal(attr_type, H5T_NATIVE_CHAR) )
         {
             std::vector< char > vc(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vc.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vc.data());
+#endif            
             a = Attribute(vc);
         } else if( H5Tequal(attr_type, H5T_NATIVE_UCHAR) )
         {
             std::vector< unsigned char > vu(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vu.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vu.data());
+#endif
             a = Attribute(vu);
         } else if( H5Tequal(attr_type, H5T_NATIVE_SHORT) )
         {
             std::vector< short > vint16(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vint16.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vint16.data());
+#endif
             a = Attribute(vint16);
         } else if( H5Tequal(attr_type, H5T_NATIVE_INT) )
         {
             std::vector< int > vint32(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vint32.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vint32.data());
+#endif
             a = Attribute(vint32);
         } else if( H5Tequal(attr_type, H5T_NATIVE_LONG) )
         {
             std::vector< long > vint64(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vint64.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vint64.data());
+#endif
             a = Attribute(vint64);
         } else if( H5Tequal(attr_type, H5T_NATIVE_LLONG) )
         {
             std::vector< long long > vint64(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vint64.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vint64.data());
+#endif
             a = Attribute(vint64);
         } else if( H5Tequal(attr_type, H5T_NATIVE_USHORT) )
         {
             std::vector< unsigned short > vuint16(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vuint16.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vuint16.data());
+#endif
             a = Attribute(vuint16);
         } else if( H5Tequal(attr_type, H5T_NATIVE_UINT) )
         {
             std::vector< unsigned int > vuint32(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vuint32.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vuint32.data());
+#endif
             a = Attribute(vuint32);
         } else if( H5Tequal(attr_type, H5T_NATIVE_ULONG) )
         {
             std::vector< unsigned long > vuint64(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vuint64.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vuint64.data());
+#endif
             a = Attribute(vuint64);
         } else if( H5Tequal(attr_type, H5T_NATIVE_ULLONG) )
         {
             std::vector< unsigned long long > vuint64(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vuint64.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vuint64.data());
+#endif
             a = Attribute(vuint64);
         } else if( H5Tequal(attr_type, H5T_NATIVE_FLOAT) )
         {
             std::vector< float > vf(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vf.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vf.data());
+#endif
             a = Attribute(vf);
         } else if( H5Tequal(attr_type, H5T_NATIVE_DOUBLE) )
         {
             if( dims[0] == 7 && attr_name == "unitDimension" )
             {
                 std::array< double, 7 > ad;
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 &ad,
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  &ad);
+#endif
                 a = Attribute(ad);
             } else
             {
                 std::vector< double > vd(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 vd.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  vd.data());
+#endif
                 a = Attribute(vd);
             }
         } else if( H5Tequal(attr_type, H5T_NATIVE_LDOUBLE) )
         {
             std::vector< long double > vld(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vld.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vld.data());
+#endif
             a = Attribute(vld);
         }  else if( H5Tequal(attr_type, m_H5T_CFLOAT) )
         {
             std::vector< std::complex< float > > vcf(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vcf.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vcf.data());
+#endif
             a = Attribute(vcf);
         } else if( H5Tequal(attr_type, m_H5T_CDOUBLE) )
         {
             std::vector< std::complex< double > > vcd(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vcd.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vcd.data());
+#endif
             a = Attribute(vcd);
         } else if( H5Tequal(attr_type, m_H5T_CLONG_DOUBLE) )
         {
             std::vector< std::complex< long double > > vcld(dims[0], 0);
+#ifdef HDF5_VOL_ASYNC
+            status = H5Aread_async(attr_id,
+                             attr_type,
+                             vcld.data(),
+                             es_id);
+#else
             status = H5Aread(attr_id,
                              attr_type,
                              vcld.data());
+#endif
             a = Attribute(vcld);
         } else if( H5Tget_class(attr_type) == H5T_STRING )
         {
@@ -1792,9 +2553,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
             if( H5Tis_variable_str(attr_type) )
             {
                 std::vector< char * > vc(dims[0]);
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 vc.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  vc.data());
+#endif
                 VERIFY(status == 0,
                     "[HDF5] Internal error: Failed to read attribute " + attr_name +
                     " at " + concrete_h5_file_position(writable));
@@ -1808,9 +2576,16 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
             {
                 size_t length = H5Tget_size(attr_type);
                 std::vector< char > c(dims[0] * length);
+#ifdef HDF5_VOL_ASYNC
+                status = H5Aread_async(attr_id,
+                                 attr_type,
+                                 c.data(),
+                                 es_id);
+#else
                 status = H5Aread(attr_id,
                                  attr_type,
                                  c.data());
+#endif
                 for( hsize_t i = 0; i < dims[0]; ++i )
                     vs.push_back(auxiliary::strip(std::string(c.data() + i*length, length), {'\0'}));
             }
@@ -1831,9 +2606,17 @@ HDF5IOHandlerImpl::readAttribute(Writable* writable,
     auto resource = parameters.resource;
     *resource = a.getResource();
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Aclose_async(attr_id, es_id);
+#else
     status = H5Aclose(attr_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close attribute " + attr_name + " at " + concrete_h5_file_position(writable) + " during attribute read");
+#ifdef HDF5_VOL_ASYNC
+    status = H5Oclose_async(obj_id, es_id);
+#else
     status = H5Oclose(obj_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close " + concrete_h5_file_position(writable) + " during attribute read");
     status = H5Pclose(fapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 attribute during attribute read");
@@ -1857,13 +2640,23 @@ HDF5IOHandlerImpl::listPaths(Writable* writable,
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
+    hid_t node_id = H5Gopen_async(file.id,
+                            concrete_h5_file_position(writable).c_str(),
+                gapl, es_id);
+#else
     hid_t node_id = H5Gopen(file.id,
                             concrete_h5_file_position(writable).c_str(),
                 gapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during path listing");
 
     H5G_info_t group_info;
+#ifdef HDF5_VOL_ASYNC
+    herr_t status = H5Gget_info_async(node_id, &group_info, es_id);
+#else
     herr_t status = H5Gget_info(node_id, &group_info);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to get HDF5 group info for " + concrete_h5_file_position(writable) + " during path listing");
 
     auto paths = parameters.paths;
@@ -1878,7 +2671,11 @@ HDF5IOHandlerImpl::listPaths(Writable* writable,
         }
     }
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Gclose_async(node_id, es_id);
+#else
     status = H5Gclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group " + concrete_h5_file_position(writable) + " during path listing");
     status = H5Pclose(gapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during path listing");
@@ -1902,13 +2699,24 @@ HDF5IOHandlerImpl::listDatasets(Writable* writable,
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
+    hid_t node_id = H5Gopen_async(file.id,
+                            concrete_h5_file_position(writable).c_str(),
+                gapl,
+                es_id);
+#else
     hid_t node_id = H5Gopen(file.id,
                             concrete_h5_file_position(writable).c_str(),
                 gapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during dataset listing");
 
     H5G_info_t group_info;
+#ifdef HDF5_VOL_ASYNC
+    herr_t status = H5Gget_info_async(node_id, &group_info, es_id);
+#else
     herr_t status = H5Gget_info(node_id, &group_info);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to get HDF5 group info for " + concrete_h5_file_position(writable) + " during dataset listing");
 
     auto datasets = parameters.datasets;
@@ -1923,7 +2731,11 @@ HDF5IOHandlerImpl::listDatasets(Writable* writable,
         }
     }
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Gclose_async(node_id, es_id);
+#else
     status = H5Gclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 group " + concrete_h5_file_position(writable) + " during dataset listing");
     status = H5Pclose(gapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during dataset listing");
@@ -1947,9 +2759,16 @@ void HDF5IOHandlerImpl::listAttributes(Writable* writable,
     }
 #endif
 
+#ifdef HDF5_VOL_ASYNC
+    node_id = H5Oopen_async(file.id,
+                      concrete_h5_file_position(writable).c_str(),
+                      fapl,
+                      es_id);
+#else
     node_id = H5Oopen(file.id,
                       concrete_h5_file_position(writable).c_str(),
                       fapl);
+#endif
     VERIFY(node_id >= 0, "[HDF5] Internal error: Failed to open HDF5 group during attribute listing");
 
     herr_t status;
@@ -1985,7 +2804,11 @@ void HDF5IOHandlerImpl::listAttributes(Writable* writable,
         attributes->push_back(std::string(name.data(), name_length));
     }
 
+#ifdef HDF5_VOL_ASYNC
+    status = H5Oclose_async(node_id, es_id);
+#else
     status = H5Oclose(node_id);
+#endif
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 object during attribute listing");
     status = H5Pclose(fapl);
     VERIFY(status == 0, "[HDF5] Internal error: Failed to close HDF5 property during dataset listing");

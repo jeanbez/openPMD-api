@@ -72,6 +72,7 @@ namespace openPMD
         hid_t m_fileAccessProperty;
         hid_t m_fileCreateProperty;
 
+	hid_t es_id;
         hbool_t m_hdf5_collective_metadata = 1;
 
         // h5py compatible types for bool and complex

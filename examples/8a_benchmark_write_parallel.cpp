@@ -332,7 +332,7 @@ public:
    */
   unsigned int m_Seg = 1;
   int m_Steps = 5;   //!< num of iterations
-  int m_Sleep = 60;  //!< duration of sleep time to emulate computation
+  int m_Sleep = 20;  //!< duration of sleep time to emulate computation
   std::string m_Backend = ".bp"; //!< I/O backend by file ending
   bool m_Unbalance = false;      //! load is different among processors
 
