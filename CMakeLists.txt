@@ -87,6 +87,8 @@ option(openPMD_USE_INTERNAL_JSON     "Use internally shipped nlohmann-json" ON)
 option(openPMD_USE_INVASIVE_TESTS "Enable unit tests that modify source code" OFF)
 option(openPMD_USE_VERIFY "Enable internal VERIFY (assert) macro independent of build type" ON)
 
+OPTION(HDF5_VOL_ASYNC "Enable the HDF5 VOL async connector" ON) # Enabled by default
+
 set(CMAKE_CONFIGURATION_TYPES "Release;Debug;MinSizeRel;RelWithDebInfo")
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING
@@ -227,6 +229,10 @@ elseif(openPMD_USE_HDF5)
 else()
     set(openPMD_HAVE_HDF5 FALSE)
 endif()
+
+IF(HDF5_VOL_ASYNC)
+    ADD_DEFINITIONS(-DHDF5_VOL_ASYNC)
+ENDIF(HDF5_VOL_ASYNC)
 
 # HDF5 checks
 string(CONCAT openPMD_HDF5_STATUS "")
