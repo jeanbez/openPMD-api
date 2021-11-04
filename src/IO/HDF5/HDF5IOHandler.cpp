@@ -276,7 +276,8 @@ HDF5IOHandlerImpl::createPath(Writable* writable,
         {
             // avoid creation of paths that already exist
 #ifdef HDF5_VOL_ASYNC
-            htri_t const found = H5Lexists_async(groups.top(), folder.c_str(), H5P_DEFAULT, es_id);
+            hbool_t found;
+            H5Lexists_async(groups.top(), folder.c_str(), &found, H5P_DEFAULT, es_id);
 #else
             htri_t const found = H5Lexists(groups.top(), folder.c_str(), H5P_DEFAULT);
 #endif
