@@ -63,6 +63,8 @@ ParallelHDF5IOHandlerImpl::ParallelHDF5IOHandlerImpl(
     m_fileAccessProperty = H5Pcreate(H5P_FILE_ACCESS);
     m_fileCreateProperty = H5Pcreate(H5P_FILE_CREATE);
 
+    H5Pset_libver_bounds(m_fileAccessProperty, H5F_LIBVER_V110, H5F_LIBVER_LATEST);
+
 #if H5_VERSION_GE(1,10,1)
     auto const hdf5_spaced_allocation = auxiliary::getEnvString( "OPENPMD_HDF5_PAGED_ALLOCATION", "ON" );
     if( hdf5_spaced_allocation == "ON" ) {
